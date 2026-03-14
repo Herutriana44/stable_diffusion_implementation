@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stable Diffusion Inpainting</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        h1 { color: #00d9ff; margin-bottom: 8px; }
+        .subtitle { color: #888; margin-bottom: 24px; }
+        .section {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .section h2 { margin-top: 0; color: #00d9ff; font-size: 1.1rem; }
+        input[type="text"], input[type="url"], input[type="password"] {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            background: #0f3460;
+            color: #fff;
+            margin-bottom: 10px;
+        }
+        input:focus { outline: none; border-color: #00d9ff; }
+        label { display: block; margin-bottom: 4px; color: #aaa; font-size: 0.9rem; }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .btn-primary { background: #00d9ff; color: #1a1a2e; }
+        .btn-primary:hover { background: #00b8d9; }
+        .btn-secondary { background: #0f3460; color: #fff; }
+        .btn-secondary:hover { background: #1a4a7a; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .flex { display: flex; gap: 16px; flex-wrap: wrap; }
+        .flex-1 { flex: 1; min-width: 280px; }
+        .canvas-container {
+            position: relative;
+            display: inline-block;
+            border: 2px solid #0f3460;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #0a0a15;
+        }
+        .canvas-wrapper {
+            position: relative;
+            max-width: 100%;
+        }
+        #imageCanvas, #maskCanvas {
+            display: block;
+            cursor: crosshair;
+        }
+        #maskCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: auto;
+        }
+        .brush-controls {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: 12px 0;
+        }
+        .brush-controls label { margin-bottom: 0; }
+        .brush-controls input[type="range"] { width: 120px; }
+        .status { padding: 10px; border-radius: 8px; margin: 10px 0; }
+        .status.loading { background: #0f3460; color: #00d9ff; }
+        .status.error { background: #5c1a1a; color: #ff6b6b; }
+        .status.success { background: #1a5c2e; color: #6bff6b; }
+        #resultImage { max-width: 100%; border-radius: 8px; margin-top: 12px; }
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <h1>Stable Diffusion Inpainting</h1>
+    <p class="subtitle">Upload gambar → Gambar mask di area yang ingin di-inpaint → Isi prompt → Inference</p>
+
+    <!-- 1. Load Model dari Civit AI -->
+    <div class="section">
+        <h2>1. Load Model (Civit AI)</h2>
+        <p style="color: #888; font-size: 0.85rem; margin-bottom: 12px;">Gunakan model inpainting (mis. SD 1.5 Inpainting). Cari "inpainting" di Civit AI.</p>
+        <label>URL Model Civit AI</label>
+        <input type="url" id="modelUrl" placeholder="https://civitai.com/api/download/models/12345 atau https://civitai.com/models/12345/nama-model">
+        <label>API Key Civit AI (opsional untuk model publik)</label>
+        <input type="password" id="apiKey" placeholder="API key dari civitai.com/user/account">
+        <button class="btn-primary" id="loadModelBtn" style="margin-top: 10px;">Load Model</button>
+        <div id="modelStatus"></div>
+    </div>
+
+    <!-- 2. Upload Gambar & Inpainting -->
+    <div class="section">
+        <h2>2. Upload Gambar & Gambar Mask Inpainting</h2>
+        <p style="color: #888; font-size: 0.9rem;">Upload gambar, lalu gambar di area yang ingin diubah (warna putih = area inpainting)</p>
+        <input type="file" id="imageInput" accept="image/*">
+        <div class="brush-controls" id="brushControls" style="display: none;">
+            <label>Ukuran Brush: <span id="brushSizeVal">30</span>px</label>
+            <input type="range" id="brushSize" min="5" max="100" value="30">
+            <button class="btn-secondary" id="clearMaskBtn">Hapus Mask</button>
+        </div>
+        <div class="canvas-wrapper" id="canvasWrapper" style="display: none; margin-top: 12px;">
+            <div class="canvas-container">
+                <canvas id="imageCanvas"></canvas>
+                <canvas id="maskCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Prompt & Inference -->
+    <div class="section">
+        <h2>3. Prompt & Inference</h2>
+        <label>Prompt (wajib)</label>
+        <input type="text" id="prompt" placeholder="deskripsi untuk area yang di-inpaint, contoh: a beautiful flower">
+        <label>Negative Prompt</label>
+        <input type="text" id="negativePrompt" value="blurry, low quality, distorted">
+        <div class="flex" style="gap: 8px; margin-top: 12px;">
+            <label style="flex: 1;">Strength: <span id="strengthVal">0.75</span></label>
+            <label style="flex: 1;">Steps: <span id="stepsVal">50</span></label>
+            <label style="flex: 1;">Seed: <input type="number" id="seed" value="42" style="width: 80px; display: inline;"></label>
+        </div>
+        <input type="range" id="strength" min="0.1" max="1" step="0.05" value="0.75" style="width: 200px;">
+        <input type="range" id="numSteps" min="10" max="100" value="50" style="width: 200px;">
+        <button class="btn-primary" id="inpaintBtn" style="margin-top: 16px;" disabled>Jalankan Inpainting</button>
+        <div id="inpaintStatus"></div>
+        <div id="resultContainer" style="display: none;">
+            <h3 style="margin-top: 20px;">Hasil</h3>
+            <img id="resultImage" alt="Result">
+        </div>
+    </div>
+
+    <script>
+        const imageInput = document.getElementById('imageInput');
+        const imageCanvas = document.getElementById('imageCanvas');
+        const maskCanvas = document.getElementById('maskCanvas');
+        const canvasWrapper = document.getElementById('canvasWrapper');
+        const brushControls = document.getElementById('brushControls');
+        const brushSize = document.getElementById('brushSize');
+        const brushSizeVal = document.getElementById('brushSizeVal');
+        const clearMaskBtn = document.getElementById('clearMaskBtn');
+        const loadModelBtn = document.getElementById('loadModelBtn');
+        const modelStatus = document.getElementById('modelStatus');
+        const modelUrl = document.getElementById('modelUrl');
+        const apiKey = document.getElementById('apiKey');
+        const promptInput = document.getElementById('prompt');
+        const negativePrompt = document.getElementById('negativePrompt');
+        const strengthInput = document.getElementById('strength');
+        const strengthVal = document.getElementById('strengthVal');
+        const numStepsInput = document.getElementById('numSteps');
+        const stepsVal = document.getElementById('stepsVal');
+        const seedInput = document.getElementById('seed');
+        const inpaintBtn = document.getElementById('inpaintBtn');
+        const inpaintStatus = document.getElementById('inpaintStatus');
+        const resultContainer = document.getElementById('resultContainer');
+        const resultImage = document.getElementById('resultImage');
+
+        let sourceImage = null;
+        let isDrawing = false;
+
+        // Brush size
+        brushSize.oninput = () => { brushSizeVal.textContent = brushSize.value; };
+        strengthInput.oninput = () => { strengthVal.textContent = strengthInput.value; };
+        numStepsInput.oninput = () => { stepsVal.textContent = numStepsInput.value; };
+
+        // Load Model
+        loadModelBtn.onclick = async () => {
+            const url = modelUrl.value.trim();
+            if (!url) {
+                showStatus(modelStatus, 'URL model wajib diisi', 'error');
+                return;
+            }
+            loadModelBtn.disabled = true;
+            showStatus(modelStatus, 'Mendownload dan memuat model...', 'loading');
+            try {
+                const res = await fetch('/api/load-model', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, api_key: apiKey.value.trim() })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showStatus(modelStatus, data.message, 'success');
+                } else {
+                    showStatus(modelStatus, data.error || 'Gagal load model', 'error');
+                }
+            } catch (e) {
+                showStatus(modelStatus, 'Error: ' + e.message, 'error');
+            }
+            loadModelBtn.disabled = false;
+        };
+
+        function showStatus(el, msg, type) {
+            el.innerHTML = `<div class="status ${type}">${msg}</div>`;
+        }
+
+        // Image upload & canvas setup
+        imageInput.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const img = new Image();
+            img.onload = () => {
+                sourceImage = img;
+                const maxSize = 512;
+                let w = img.width, h = img.height;
+                if (w > maxSize || h > maxSize) {
+                    const ratio = Math.min(maxSize / w, maxSize / h);
+                    w = Math.floor(w * ratio);
+                    h = Math.floor(h * ratio);
+                }
+                w = Math.floor(w / 8) * 8;
+                h = Math.floor(h / 8) * 8;
+
+                imageCanvas.width = maskCanvas.width = w;
+                imageCanvas.height = maskCanvas.height = h;
+
+                const imgCtx = imageCanvas.getContext('2d');
+                imgCtx.drawImage(img, 0, 0, w, h);
+
+                const maskCtx = maskCanvas.getContext('2d');
+                maskCtx.clearRect(0, 0, w, h);
+                maskCtx.globalCompositeOperation = 'source-over';
+
+                canvasWrapper.style.display = 'block';
+                brushControls.style.display = 'flex';
+                inpaintBtn.disabled = false;
+            };
+            img.src = URL.createObjectURL(file);
+        };
+
+        // Draw on mask canvas
+        function getPos(e) {
+            const rect = maskCanvas.getBoundingClientRect();
+            const scaleX = maskCanvas.width / rect.width;
+            const scaleY = maskCanvas.height / rect.height;
+            return {
+                x: (e.clientX - rect.left) * scaleX,
+                y: (e.clientY - rect.top) * scaleY
+            };
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            const ctx = maskCanvas.getContext('2d');
+            const pos = getPos(e);
+            const size = parseInt(brushSize.value);
+            ctx.fillStyle = 'rgba(255,255,255,0.7)';  // Semi-transparent agar gambar terlihat
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, size / 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        maskCanvas.addEventListener('mousedown', (e) => { isDrawing = true; draw(e); });
+        maskCanvas.addEventListener('mousemove', draw);
+        maskCanvas.addEventListener('mouseup', () => { isDrawing = false; });
+        maskCanvas.addEventListener('mouseleave', () => { isDrawing = false; });
+
+        clearMaskBtn.onclick = () => {
+            const ctx = maskCanvas.getContext('2d');
+            ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+        };
+
+        // Get mask as base64 (white = inpaint area). Threshold: pixel dengan luminance/alpha > 128 = putih
+        function getMaskBase64() {
+            const ctx = maskCanvas.getContext('2d');
+            const imgData = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+            const data = imgData.data;
+            const out = ctx.createImageData(maskCanvas.width, maskCanvas.height);
+            for (let i = 0; i < data.length; i += 4) {
+                const v = (data[i] > 50 || data[i+1] > 50 || data[i+2] > 50 || data[i+3] > 50) ? 255 : 0;
+                out.data[i] = out.data[i+1] = out.data[i+2] = v;
+                out.data[i+3] = 255;
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = maskCanvas.width;
+            canvas.height = maskCanvas.height;
+            canvas.getContext('2d').putImageData(out, 0, 0);
+            return canvas.toDataURL('image/png');
+        }
+
+        function getImageBase64() {
+            return imageCanvas.toDataURL('image/png');
+        }
+
+        // Inpaint
+        inpaintBtn.onclick = async () => {
+            const prompt = promptInput.value.trim();
+            if (!prompt) {
+                showStatus(inpaintStatus, 'Prompt wajib diisi', 'error');
+                return;
+            }
+            if (!sourceImage) {
+                showStatus(inpaintStatus, 'Upload gambar terlebih dahulu', 'error');
+                return;
+            }
+
+            inpaintBtn.disabled = true;
+            showStatus(inpaintStatus, 'Menjalankan inpainting...', 'loading');
+
+            try {
+                const res = await fetch('/api/inpaint', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        image: getImageBase64(),
+                        mask: getMaskBase64(),
+                        prompt,
+                        negative_prompt: negativePrompt.value,
+                        strength: parseFloat(strengthInput.value),
+                        guidance_scale: 7.5,
+                        num_steps: parseInt(numStepsInput.value),
+                        seed: parseInt(seedInput.value) || 42
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    resultImage.src = data.image;
+                    resultContainer.style.display = 'block';
+                    showStatus(inpaintStatus, 'Selesai!', 'success');
+                } else {
+                    showStatus(inpaintStatus, data.error || 'Gagal', 'error');
+                }
+            } catch (e) {
+                showStatus(inpaintStatus, 'Error: ' + e.message, 'error');
+            }
+            inpaintBtn.disabled = false;
+        };
+    </script>
+</body>
+</html>
