@@ -209,7 +209,6 @@
         let cropX = 0, cropY = 0;
         let cropDragging = false;
         let cropDragStartX = 0, cropDragStartY = 0;
-        let cropScale = 1;
 
         const cropStage = document.getElementById('cropStage');
         const cropCanvas = document.getElementById('cropCanvas');
@@ -251,24 +250,32 @@
             el.innerHTML = `<div class="status ${type}">${msg}</div>`;
         }
 
-        // Image upload -> show crop stage
+        // Resize image mendekati SD input (max 512), pertahankan rasio, kelipatan 8
+        const SD_MAX_DIM = 512;
+        function resizeForSD(img) {
+            const scale = Math.min(1, SD_MAX_DIM / Math.max(img.width, img.height));
+            let newW = Math.floor((img.width * scale) / 8) * 8;
+            let newH = Math.floor((img.height * scale) / 8) * 8;
+            newW = Math.max(64, newW);
+            newH = Math.max(64, newH);
+            const resized = document.createElement('canvas');
+            resized.width = newW;
+            resized.height = newH;
+            resized.getContext('2d').drawImage(img, 0, 0, newW, newH);
+            return resized;
+        }
+
+        // Image upload -> resize untuk SD -> show crop stage
         imageInput.onchange = (e) => {
             const file = e.target.files[0];
             if (!file) return;
             const img = new Image();
             img.onload = () => {
-                sourceImage = img;
-                const w = Math.min(img.width, 800), h = Math.min(img.height, 600);
-                cropScale = Math.min(w / img.width, h / img.height);
-                cropCanvas.width = img.width;
-                cropCanvas.height = img.height;
-                const ctx = cropCanvas.getContext('2d');
-                ctx.drawImage(img, 0, 0);
+                sourceImage = resizeForSD(img);
+                cropCanvas.width = sourceImage.width;
+                cropCanvas.height = sourceImage.height;
+                cropCanvas.getContext('2d').drawImage(sourceImage, 0, 0);
 
-                let cw = parseInt(cropWidthInput.value) || 512;
-                let ch = parseInt(cropHeightInput.value) || 512;
-                cw = Math.floor(cw / 8) * 8;
-                ch = Math.floor(ch / 8) * 8;
                 cropX = 0;
                 cropY = 0;
                 setTimeout(updateCropBox, 50);
