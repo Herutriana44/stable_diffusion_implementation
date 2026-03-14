@@ -1,0 +1,6 @@
+.env
+models/
+uploads/
+outputs/
+__pycache__/
+*.pyc

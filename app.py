@@ -2,10 +2,14 @@
 Flask app untuk Stable Diffusion Inpainting.
 Input: gambar (wajib), prompt, mask inpainting (digambar di web).
 Model dari Civit AI (URL + API key).
+Default URL dan API key bisa di-set via .env (CIVITAI_MODEL_URL, CIVITAI_API_KEY).
 """
 
 import os
 import re
+from dotenv import load_dotenv
+
+load_dotenv()
 import io
 import base64
 import hashlib
@@ -133,7 +137,11 @@ def load_pipeline(model_path: str):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template(
+        "index.html",
+        civitai_model_url=os.getenv("CIVITAI_MODEL_URL", ""),
+        civitai_api_key=os.getenv("CIVITAI_API_KEY", ""),
+    )
 
 
 @app.route("/api/load-model", methods=["POST"])

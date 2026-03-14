@@ -89,32 +89,57 @@
         .status.error { background: #5c1a1a; color: #ff6b6b; }
         .status.success { background: #1a5c2e; color: #6bff6b; }
         #resultImage { max-width: 100%; border-radius: 8px; margin-top: 12px; }
+        .crop-wrapper { position: relative; display: inline-block; max-width: 100%; cursor: crosshair; }
+        .crop-wrapper canvas { max-width: 100%; height: auto; display: block; }
+        .crop-box {
+            position: absolute; border: 2px solid #00d9ff; background: rgba(0,217,255,0.15);
+            cursor: move; box-sizing: border-box;
+        }
         .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
     <h1>Stable Diffusion Inpainting</h1>
-    <p class="subtitle">Upload gambar → Gambar mask di area yang ingin di-inpaint → Isi prompt → Inference</p>
+    <p class="subtitle">Upload → Crop (pilih area) → Gambar mask → Prompt → Inference</p>
 
     <!-- 1. Load Model dari Civit AI -->
     <div class="section">
         <h2>1. Load Model (Civit AI)</h2>
         <p style="color: #888; font-size: 0.85rem; margin-bottom: 12px;">Gunakan model inpainting (mis. SD 1.5 Inpainting). Cari "inpainting" di Civit AI.</p>
         <label>URL Model Civit AI</label>
-        <input type="url" id="modelUrl" placeholder="https://civitai.com/api/download/models/12345 atau https://civitai.com/models/12345/nama-model">
+        <input type="url" id="modelUrl" value="{{ civitai_model_url or '' }}" placeholder="https://civitai.com/api/download/models/12345 atau https://civitai.com/models/12345/nama-model">
         <label>API Key Civit AI (opsional untuk model publik)</label>
-        <input type="password" id="apiKey" placeholder="API key dari civitai.com/user/account">
+        <input type="password" id="apiKey" value="{{ civitai_api_key or '' }}" placeholder="API key dari civitai.com/user/account">
         <button class="btn-primary" id="loadModelBtn" style="margin-top: 10px;">Load Model</button>
         <div id="modelStatus"></div>
     </div>
 
-    <!-- 2. Upload Gambar & Inpainting -->
+    <!-- 2. Upload, Crop, & Inpainting -->
     <div class="section">
-        <h2>2. Upload Gambar & Gambar Mask Inpainting</h2>
-        <p style="color: #888; font-size: 0.9rem;">Upload gambar, lalu gambar di area yang ingin diubah (warna putih = area inpainting)</p>
+        <h2>2. Upload Gambar & Crop</h2>
+        <p style="color: #888; font-size: 0.9rem;">Upload gambar, lalu pilih area crop (ukuran harus kelipatan 8 untuk SD)</p>
         <input type="file" id="imageInput" accept="image/*">
-        <div class="brush-controls" id="brushControls" style="display: none;">
+        <div id="cropStage" style="display: none; margin-top: 12px;">
+            <p style="color: #aaa; font-size: 0.9rem;">Atur ukuran crop (kelipatan 8) dan geser kotak untuk memilih area:</p>
+            <div class="flex" style="gap: 12px; margin-bottom: 12px;">
+                <div>
+                    <label>Lebar (px)</label>
+                    <input type="number" id="cropWidth" min="64" max="2048" value="512" step="8" style="width: 80px;">
+                </div>
+                <div>
+                    <label>Tinggi (px)</label>
+                    <input type="number" id="cropHeight" min="64" max="2048" value="512" step="8" style="width: 80px;">
+                </div>
+                <button class="btn-primary" id="applyCropBtn" style="align-self: flex-end;">Terapkan Crop</button>
+            </div>
+            <div class="crop-wrapper" id="cropWrapper">
+                <canvas id="cropCanvas"></canvas>
+                <div id="cropBox" class="crop-box"></div>
+            </div>
+        </div>
+        <div class="brush-controls" id="brushControls" style="display: none; margin-top: 16px;">
+            <p style="color: #aaa; font-size: 0.9rem; width: 100%;">Gambar mask di area yang ingin di-inpaint (putih):</p>
             <label>Ukuran Brush (px)</label>
             <input type="number" id="brushSize" min="5" max="200" value="30" style="width: 80px;">
             <button class="btn-secondary" id="clearMaskBtn">Hapus Mask</button>
@@ -153,6 +178,7 @@
         <div id="resultContainer" style="display: none;">
             <h3 style="margin-top: 20px;">Hasil</h3>
             <img id="resultImage" alt="Result">
+            <button class="btn-primary" id="downloadBtn" style="margin-top: 12px;">Download Gambar</button>
         </div>
     </div>
 
@@ -180,7 +206,19 @@
 
         let sourceImage = null;
         let isDrawing = false;
+        let cropX = 0, cropY = 0;
+        let cropDragging = false;
+        let cropDragStartX = 0, cropDragStartY = 0;
+        let cropScale = 1;
 
+        const cropStage = document.getElementById('cropStage');
+        const cropCanvas = document.getElementById('cropCanvas');
+        const cropWrapper = document.getElementById('cropWrapper');
+        const cropBox = document.getElementById('cropBox');
+        const cropWidthInput = document.getElementById('cropWidth');
+        const cropHeightInput = document.getElementById('cropHeight');
+        const applyCropBtn = document.getElementById('applyCropBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
 
         // Load Model
         loadModelBtn.onclick = async () => {
@@ -213,32 +251,110 @@
             el.innerHTML = `<div class="status ${type}">${msg}</div>`;
         }
 
-        // Image upload & canvas setup
+        // Image upload -> show crop stage
         imageInput.onchange = (e) => {
             const file = e.target.files[0];
             if (!file) return;
             const img = new Image();
             img.onload = () => {
                 sourceImage = img;
-                let w = img.width, h = img.height;
-                w = Math.floor(w / 8) * 8;
-                h = Math.floor(h / 8) * 8;
+                const w = Math.min(img.width, 800), h = Math.min(img.height, 600);
+                cropScale = Math.min(w / img.width, h / img.height);
+                cropCanvas.width = img.width;
+                cropCanvas.height = img.height;
+                const ctx = cropCanvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
 
-                imageCanvas.width = maskCanvas.width = w;
-                imageCanvas.height = maskCanvas.height = h;
-
-                const imgCtx = imageCanvas.getContext('2d');
-                imgCtx.drawImage(img, 0, 0, w, h);
-
-                const maskCtx = maskCanvas.getContext('2d');
-                maskCtx.clearRect(0, 0, w, h);
-                maskCtx.globalCompositeOperation = 'source-over';
-
-                canvasWrapper.style.display = 'block';
-                brushControls.style.display = 'flex';
-                inpaintBtn.disabled = false;
+                let cw = parseInt(cropWidthInput.value) || 512;
+                let ch = parseInt(cropHeightInput.value) || 512;
+                cw = Math.floor(cw / 8) * 8;
+                ch = Math.floor(ch / 8) * 8;
+                cropX = 0;
+                cropY = 0;
+                setTimeout(updateCropBox, 50);
+                cropStage.style.display = 'block';
+                canvasWrapper.style.display = 'none';
+                brushControls.style.display = 'none';
+                inpaintBtn.disabled = true;
             };
             img.src = URL.createObjectURL(file);
+        };
+
+        function updateCropBox() {
+            if (!sourceImage) return;
+            let cw = Math.floor((parseInt(cropWidthInput.value) || 512) / 8) * 8;
+            let ch = Math.floor((parseInt(cropHeightInput.value) || 512) / 8) * 8;
+            cw = Math.min(cw, sourceImage.width);
+            ch = Math.min(ch, sourceImage.height);
+            cropX = Math.max(0, Math.min(sourceImage.width - cw, cropX));
+            cropY = Math.max(0, Math.min(sourceImage.height - ch, cropY));
+            const rect = cropCanvas.getBoundingClientRect();
+            if (rect.width === 0) return;
+            const scale = cropCanvas.width / rect.width;
+            cropBox.style.left = (cropX / scale) + 'px';
+            cropBox.style.top = (cropY / scale) + 'px';
+            cropBox.style.width = (cw / scale) + 'px';
+            cropBox.style.height = (ch / scale) + 'px';
+        }
+
+        cropWidthInput.onchange = cropHeightInput.onchange = () => updateCropBox();
+
+        cropBox.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            cropDragging = true;
+            const rect = cropCanvas.getBoundingClientRect();
+            const scale = cropCanvas.width / rect.width;
+            cropDragStartX = e.clientX - (rect.left + cropX / scale);
+            cropDragStartY = e.clientY - (rect.top + cropY / scale);
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!cropDragging || !sourceImage) return;
+            const rect = cropCanvas.getBoundingClientRect();
+            const scale = cropCanvas.width / rect.width;
+            const cw = Math.floor((parseInt(cropWidthInput.value) || 512) / 8) * 8;
+            const ch = Math.floor((parseInt(cropHeightInput.value) || 512) / 8) * 8;
+            cropX = Math.round(((e.clientX - rect.left) - cropDragStartX) * scale);
+            cropY = Math.round(((e.clientY - rect.top) - cropDragStartY) * scale);
+            cropX = Math.max(0, Math.min(sourceImage.width - cw, cropX));
+            cropY = Math.max(0, Math.min(sourceImage.height - ch, cropY));
+            updateCropBox();
+        });
+        document.addEventListener('mouseup', () => { cropDragging = false; });
+
+        cropWrapper.addEventListener('click', (e) => {
+            if (e.target === cropCanvas) {
+                const rect = cropCanvas.getBoundingClientRect();
+                const scale = cropCanvas.width / rect.width;
+                const cw = Math.floor((parseInt(cropWidthInput.value) || 512) / 8) * 8;
+                const ch = Math.floor((parseInt(cropHeightInput.value) || 512) / 8) * 8;
+                cropX = Math.round((e.clientX - rect.left) * scale - cw / 2);
+                cropY = Math.round((e.clientY - rect.top) * scale - ch / 2);
+                cropX = Math.max(0, Math.min(sourceImage.width - cw, cropX));
+                cropY = Math.max(0, Math.min(sourceImage.height - ch, cropY));
+                updateCropBox();
+            }
+        });
+
+        applyCropBtn.onclick = () => {
+            if (!sourceImage) return;
+            let cw = Math.floor((parseInt(cropWidthInput.value) || 512) / 8) * 8;
+            let ch = Math.floor((parseInt(cropHeightInput.value) || 512) / 8) * 8;
+            cw = Math.min(cw, sourceImage.width);
+            ch = Math.min(ch, sourceImage.height);
+            cropX = Math.max(0, Math.min(sourceImage.width - cw, cropX));
+            cropY = Math.max(0, Math.min(sourceImage.height - ch, cropY));
+
+            imageCanvas.width = maskCanvas.width = cw;
+            imageCanvas.height = maskCanvas.height = ch;
+            const imgCtx = imageCanvas.getContext('2d');
+            imgCtx.drawImage(sourceImage, cropX, cropY, cw, ch, 0, 0, cw, ch);
+            const maskCtx = maskCanvas.getContext('2d');
+            maskCtx.clearRect(0, 0, cw, ch);
+
+            cropStage.style.display = 'none';
+            canvasWrapper.style.display = 'block';
+            brushControls.style.display = 'flex';
+            inpaintBtn.disabled = false;
         };
 
         // Draw on mask canvas
@@ -330,6 +446,7 @@
                     resultImage.src = data.image;
                     resultContainer.style.display = 'block';
                     showStatus(inpaintStatus, 'Selesai!', 'success');
+                    downloadBtn.style.display = 'inline-block';
                 } else {
                     showStatus(inpaintStatus, data.error || 'Gagal', 'error');
                 }
@@ -337,6 +454,15 @@
                 showStatus(inpaintStatus, 'Error: ' + e.message, 'error');
             }
             inpaintBtn.disabled = false;
+        };
+
+        downloadBtn.onclick = () => {
+            const src = resultImage.src;
+            if (!src) return;
+            const a = document.createElement('a');
+            a.href = src;
+            a.download = 'inpaint_result.png';
+            a.click();
         };
     </script>
 </body>
