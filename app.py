@@ -7,6 +7,9 @@ Default URL dan API key bisa di-set via .env (CIVITAI_MODEL_URL, CIVITAI_API_KEY
 
 import os
 import re
+import time
+import uuid
+import zipfile
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,13 +18,25 @@ import base64
 import hashlib
 import requests
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_file
 from PIL import Image
 import torch
+
+# Template prompt - format list, bisa diubah sesuai kebutuhan
+PROMPT_TEMPLATES = [
+    "a beautiful flower, highly detailed, 8k",
+    "a cute cat, photorealistic, soft lighting",
+    "a serene landscape, mountains, sunset, 4k",
+    "portrait of a person, professional photo, studio lighting",
+    "abstract art, vibrant colors, modern design",
+]
 
 # Lazy load diffusers - hanya saat inference
 _pipeline = None
 _model_path = None
+
+# Job progress untuk inpainting (background job + polling)
+_inpaint_jobs = {}
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
@@ -141,6 +156,7 @@ def index():
         "index.html",
         civitai_model_url=os.getenv("CIVITAI_MODEL_URL", ""),
         civitai_api_key=os.getenv("CIVITAI_API_KEY", ""),
+        prompt_templates=PROMPT_TEMPLATES,
     )
 
 
@@ -162,9 +178,75 @@ def load_model():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def _run_inpaint_job(job_id, image_b64, mask_b64, prompt, negative_prompt, strength, guidance_scale, num_steps, seed):
+    """Jalankan inpainting di background thread."""
+    global _inpaint_jobs
+    start_time = time.time()
+    _inpaint_jobs[job_id] = {"status": "running", "step": 0, "total_steps": num_steps, "elapsed_sec": 0}
+
+    try:
+        if "," in image_b64:
+            image_b64 = image_b64.split(",", 1)[1]
+        image_data = base64.b64decode(image_b64)
+        init_image = Image.open(io.BytesIO(image_data)).convert("RGB")
+
+        if "," in mask_b64:
+            mask_b64 = mask_b64.split(",", 1)[1]
+        mask_data = base64.b64decode(mask_b64)
+        mask_image = Image.open(io.BytesIO(mask_data)).convert("L")
+
+        if init_image.size != mask_image.size:
+            mask_image = mask_image.resize(init_image.size, Image.Resampling.LANCZOS)
+
+        w, h = init_image.size
+        w, h = (w // 8) * 8, (h // 8) * 8
+        init_image = init_image.resize((w, h), Image.Resampling.LANCZOS)
+        mask_image = mask_image.resize((w, h), Image.Resampling.LANCZOS)
+
+        pipe = load_pipeline(_model_path)
+        generator = torch.Generator(device=pipe.device).manual_seed(seed)
+
+        def progress_callback(pipe, step_index, timestep, callback_kwargs):
+            _inpaint_jobs[job_id]["step"] = step_index + 1
+            _inpaint_jobs[job_id]["elapsed_sec"] = round(time.time() - start_time, 1)
+            return callback_kwargs
+
+        result = pipe(
+            prompt=prompt,
+            image=init_image,
+            mask_image=mask_image,
+            strength=strength,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_steps,
+            negative_prompt=negative_prompt,
+            generator=generator,
+            callback_on_step_end=progress_callback,
+        )
+
+        elapsed = round(time.time() - start_time, 1)
+        output = result.images[0]
+        buf = io.BytesIO()
+        output.save(buf, format="PNG")
+        output_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        _inpaint_jobs[job_id] = {
+            "status": "done",
+            "step": num_steps,
+            "total_steps": num_steps,
+            "elapsed_sec": elapsed,
+            "image": f"data:image/png;base64,{output_b64}",
+        }
+    except Exception as e:
+        _inpaint_jobs[job_id] = {
+            "status": "error",
+            "error": str(e),
+            "elapsed_sec": round(time.time() - start_time, 1),
+        }
+
+
 @app.route("/api/inpaint", methods=["POST"])
 def inpaint():
-    """Jalankan inpainting inference."""
+    """Mulai inpainting inference (background job), return job_id untuk polling."""
     data = request.get_json() or {}
     image_b64 = data.get("image")
     mask_b64 = data.get("mask")
@@ -185,53 +267,91 @@ def inpaint():
     if _pipeline is None:
         return jsonify({"success": False, "error": "Model belum dimuat. Load model terlebih dahulu."}), 400
 
+    job_id = str(uuid.uuid4())
+    import threading
+    thread = threading.Thread(
+        target=_run_inpaint_job,
+        args=(job_id, image_b64, mask_b64, prompt, negative_prompt, strength, guidance_scale, num_steps, seed),
+    )
+    thread.start()
+    return jsonify({"success": True, "job_id": job_id})
+
+
+@app.route("/api/inpaint-status/<job_id>")
+def inpaint_status(job_id):
+    """Poll progress inpainting."""
+    if job_id not in _inpaint_jobs:
+        return jsonify({"status": "unknown", "error": "Job tidak ditemukan"}), 404
+    return jsonify(_inpaint_jobs[job_id])
+
+
+@app.route("/api/download-zip", methods=["POST"])
+def download_zip():
+    """Download hasil crop + mask + inpainting dalam format zip."""
+    data = request.get_json() or {}
+    image_b64 = data.get("image")
+    mask_b64 = data.get("mask")
+    result_b64 = data.get("result")
+
+    if not image_b64 or not mask_b64 or not result_b64:
+        return jsonify({"success": False, "error": "Data gambar/mask/result tidak lengkap"}), 400
+
     try:
-        # Decode image
-        if "," in image_b64:
-            image_b64 = image_b64.split(",", 1)[1]
-        image_data = base64.b64decode(image_b64)
-        init_image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        def decode_b64(b):
+            if "," in b:
+                b = b.split(",", 1)[1]
+            return base64.b64decode(b)
 
-        # Decode mask (putih = area inpaint, hitam = keep)
-        if "," in mask_b64:
-            mask_b64 = mask_b64.split(",", 1)[1]
-        mask_data = base64.b64decode(mask_b64)
-        mask_image = Image.open(io.BytesIO(mask_data)).convert("L")
+        image_data = decode_b64(image_b64)
+        mask_data = decode_b64(mask_b64)
+        result_data = decode_b64(result_b64)
 
-        # Pastikan ukuran sama
-        if init_image.size != mask_image.size:
-            mask_image = mask_image.resize(init_image.size, Image.Resampling.LANCZOS)
-
-        # Resize ke kelipatan 8
-        w, h = init_image.size
-        w = (w // 8) * 8
-        h = (h // 8) * 8
-        init_image = init_image.resize((w, h), Image.Resampling.LANCZOS)
-        mask_image = mask_image.resize((w, h), Image.Resampling.LANCZOS)
-
-        # Invert jika perlu: SD inpainting expect putih = inpaint
-        # Canvas kita: user draw = putih, jadi sudah benar
-
-        pipe = load_pipeline(_model_path)
-        generator = torch.Generator(device=pipe.device).manual_seed(seed)
-
-        result = pipe(
-            prompt=prompt,
-            image=init_image,
-            mask_image=mask_image,
-            strength=strength,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_steps,
-            negative_prompt=negative_prompt,
-            generator=generator,
-        )
-
-        output = result.images[0]
         buf = io.BytesIO()
-        output.save(buf, format="PNG")
-        output_b64 = base64.b64encode(buf.getvalue()).decode()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("image.png", image_data)
+            zf.writestr("mask.png", mask_data)
+            zf.writestr("result.png", result_data)
 
-        return jsonify({"success": True, "image": f"data:image/png;base64,{output_b64}"})
+        buf.seek(0)
+        return send_file(
+            buf,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="inpaint_result.zip",
+        )
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/load-zip", methods=["POST"])
+def load_zip():
+    """Load zip berisi image.png + mask.png, return base64 untuk load ke canvas."""
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "File zip wajib diupload"}), 400
+
+    file = request.files["file"]
+    if not file.filename.lower().endswith(".zip"):
+        return jsonify({"success": False, "error": "File harus format zip"}), 400
+
+    try:
+        with zipfile.ZipFile(file.stream, "r") as zf:
+            names = zf.namelist()
+            if "image.png" not in names or "mask.png" not in names:
+                return jsonify({"success": False, "error": "Zip harus berisi image.png dan mask.png"}), 400
+
+            image_data = zf.read("image.png")
+            mask_data = zf.read("mask.png")
+
+        image_b64 = base64.b64encode(image_data).decode()
+        mask_b64 = base64.b64encode(mask_data).decode()
+
+        return jsonify({
+            "success": True,
+            "image": f"data:image/png;base64,{image_b64}",
+            "mask": f"data:image/png;base64,{mask_b64}",
+        })
+    except zipfile.BadZipFile:
+        return jsonify({"success": False, "error": "File zip tidak valid"}), 400
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

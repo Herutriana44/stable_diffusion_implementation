@@ -97,6 +97,34 @@
         }
         .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } }
+        .prompt-templates { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+        .btn-template {
+            padding: 8px 12px;
+            font-size: 0.85rem;
+            background: #0f3460;
+            color: #00d9ff;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 280px;
+        }
+        .btn-template:hover { background: #1a4a7a; border-color: #00d9ff; }
+        .progress-bar-wrapper {
+            width: 100%;
+            height: 24px;
+            background: #0f3460;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #00d9ff, #00b8d9);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
     </style>
 </head>
 <body>
@@ -118,33 +146,15 @@
     <!-- 2. Upload, Crop, & Inpainting -->
     <div class="section">
         <h2>2. Upload Gambar & Crop</h2>
-        <p style="color: #888; font-size: 0.9rem;">Upload gambar, lalu pilih area crop (ukuran harus kelipatan 8 untuk SD)</p>
-        <input type="file" id="imageInput" accept="image/*">
+        <p style="color: #888; font-size: 0.9rem;">Upload gambar atau load zip hasil sebelumnya. Crop fixed 1:1 (512×512 px).</p>
+        <div class="flex" style="gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
+            <input type="file" id="imageInput" accept="image/*">
+            <input type="file" id="zipInput" accept=".zip" style="display: none;">
+            <button class="btn-secondary" id="loadZipBtn">Load Zip (crop+mask)</button>
+        </div>
         <div id="cropStage" style="display: none; margin-top: 12px;">
-            <p style="color: #aaa; font-size: 0.9rem;">Pilih ratio SD, atur ukuran, lalu geser kotak untuk memilih area:</p>
-            <div class="flex" style="gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
-                <div>
-                    <label>Ratio SD</label>
-                    <select id="cropRatio" style="width: 100px; padding: 10px; border-radius: 8px; background: #0f3460; color: #fff; border: 1px solid #0f3460;">
-                        <option value="1:1">1:1</option>
-                        <option value="2:3">2:3</option>
-                        <option value="3:2">3:2</option>
-                        <option value="3:4">3:4</option>
-                        <option value="4:3">4:3</option>
-                        <option value="9:16">9:16</option>
-                        <option value="16:9">16:9</option>
-                    </select>
-                </div>
-                <div>
-                    <label>Lebar (px)</label>
-                    <input type="number" id="cropWidth" min="64" max="2048" value="512" step="8" style="width: 80px;">
-                </div>
-                <div>
-                    <label>Tinggi (px)</label>
-                    <input type="number" id="cropHeight" min="64" max="2048" value="512" step="8" style="width: 80px;">
-                </div>
-                <button class="btn-primary" id="applyCropBtn" style="align-self: flex-end;">Terapkan Crop</button>
-            </div>
+            <p style="color: #aaa; font-size: 0.9rem;">Pilih area crop 512×512 (1:1). Geser kotak untuk memilih, lalu Terapkan Crop:</p>
+            <button class="btn-primary" id="applyCropBtn" style="margin-bottom: 12px;">Terapkan Crop</button>
             <div class="crop-wrapper" id="cropWrapper">
                 <canvas id="cropCanvas"></canvas>
                 <div id="cropBox" class="crop-box"></div>
@@ -167,6 +177,12 @@
     <!-- 3. Prompt & Inference -->
     <div class="section">
         <h2>3. Prompt & Inference</h2>
+        <label>Template Prompt (klik untuk mengisi otomatis)</label>
+        <div id="promptTemplates" class="prompt-templates">
+            {% for t in prompt_templates %}
+            <button type="button" class="btn-template" data-prompt="{{ t|e }}">{{ t[:50] }}{% if t|length > 50 %}...{% endif %}</button>
+            {% endfor %}
+        </div>
         <label>Prompt (wajib)</label>
         <input type="text" id="prompt" placeholder="deskripsi untuk area yang di-inpaint, contoh: a beautiful flower">
         <label>Negative Prompt</label>
@@ -187,10 +203,20 @@
         </div>
         <button class="btn-primary" id="inpaintBtn" style="margin-top: 16px;" disabled>Jalankan Inpainting</button>
         <div id="inpaintStatus"></div>
+        <div id="progressContainer" style="display: none; margin-top: 12px;">
+            <div class="progress-bar-wrapper">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <p id="progressText" style="color: #00d9ff; margin-top: 8px; font-size: 0.9rem;">Step 0/50 • 0.0s</p>
+        </div>
         <div id="resultContainer" style="display: none;">
             <h3 style="margin-top: 20px;">Hasil</h3>
+            <p id="runtimeText" style="color: #6bff6b; font-size: 0.9rem;"></p>
             <img id="resultImage" alt="Result">
-            <button class="btn-primary" id="downloadBtn" style="margin-top: 12px;">Download Gambar</button>
+            <div style="margin-top: 12px; display: flex; gap: 12px; flex-wrap: wrap;">
+                <button class="btn-primary" id="downloadBtn">Download Gambar</button>
+                <button class="btn-primary" id="downloadZipBtn">Download Zip (crop+mask+result)</button>
+            </div>
         </div>
     </div>
 
@@ -215,6 +241,15 @@
         const inpaintStatus = document.getElementById('inpaintStatus');
         const resultContainer = document.getElementById('resultContainer');
         const resultImage = document.getElementById('resultImage');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const runtimeText = document.getElementById('runtimeText');
+        const downloadZipBtn = document.getElementById('downloadZipBtn');
+        const loadZipBtn = document.getElementById('loadZipBtn');
+        const zipInput = document.getElementById('zipInput');
+
+        const CROP_SIZE = 512;  // Fixed 1:1 512x512
 
         let sourceImage = null;
         let isDrawing = false;
@@ -226,42 +261,15 @@
         const cropCanvas = document.getElementById('cropCanvas');
         const cropWrapper = document.getElementById('cropWrapper');
         const cropBox = document.getElementById('cropBox');
-        const cropWidthInput = document.getElementById('cropWidth');
-        const cropHeightInput = document.getElementById('cropHeight');
-        const cropRatioSelect = document.getElementById('cropRatio');
         const applyCropBtn = document.getElementById('applyCropBtn');
-
-        const SD_RATIOS = { '1:1': [1,1], '2:3': [2,3], '3:2': [3,2], '3:4': [3,4], '4:3': [4,3], '9:16': [9,16], '16:9': [16,9] };
-        function getRatio() { return SD_RATIOS[cropRatioSelect.value] || [1,1]; }
-        function round8(n) { return Math.floor(n / 8) * 8; }
-        function applyRatioFromWidth() {
-            const [rw, rh] = getRatio();
-            const w = parseInt(cropWidthInput.value) || 512;
-            const h = round8(Math.max(64, w * rh / rw));
-            cropHeightInput.value = h;
-            updateCropBox();
-        }
-        function applyRatioFromHeight() {
-            const [rw, rh] = getRatio();
-            const h = parseInt(cropHeightInput.value) || 512;
-            const w = round8(Math.max(64, h * rw / rh));
-            cropWidthInput.value = w;
-            updateCropBox();
-        }
-        function applyRatioFromSelect() {
-            const [rw, rh] = getRatio();
-            const base = 512;
-            let w, h;
-            if (rw >= rh) { w = round8(base); h = round8(Math.max(64, base * rh / rw)); }
-            else { h = round8(base); w = round8(Math.max(64, base * rw / rh)); }
-            cropWidthInput.value = w;
-            cropHeightInput.value = h;
-            updateCropBox();
-        }
-        cropRatioSelect.onchange = applyRatioFromSelect;
-        cropWidthInput.onchange = applyRatioFromWidth;
-        cropHeightInput.onchange = applyRatioFromHeight;
         const downloadBtn = document.getElementById('downloadBtn');
+
+        // Template prompts - klik untuk isi prompt
+        document.querySelectorAll('.btn-template').forEach(btn => {
+            btn.onclick = () => {
+                promptInput.value = btn.dataset.prompt;
+            };
+        });
 
         // Load Model
         loadModelBtn.onclick = async () => {
@@ -309,35 +317,10 @@
             return resized;
         }
 
-        // Image upload -> resize untuk SD -> show crop stage
-        imageInput.onchange = (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            const img = new Image();
-            img.onload = () => {
-                sourceImage = resizeForSD(img);
-                cropCanvas.width = sourceImage.width;
-                cropCanvas.height = sourceImage.height;
-                cropCanvas.getContext('2d').drawImage(sourceImage, 0, 0);
-
-                cropX = 0;
-                cropY = 0;
-                applyRatioFromSelect();
-                setTimeout(updateCropBox, 50);
-                cropStage.style.display = 'block';
-                canvasWrapper.style.display = 'none';
-                brushControls.style.display = 'none';
-                inpaintBtn.disabled = true;
-            };
-            img.src = URL.createObjectURL(file);
-        };
-
         function updateCropBox() {
             if (!sourceImage) return;
-            let cw = Math.floor((parseInt(cropWidthInput.value) || 512) / 8) * 8;
-            let ch = Math.floor((parseInt(cropHeightInput.value) || 512) / 8) * 8;
-            cw = Math.min(cw, sourceImage.width);
-            ch = Math.min(ch, sourceImage.height);
+            const cw = Math.min(CROP_SIZE, sourceImage.width);
+            const ch = Math.min(CROP_SIZE, sourceImage.height);
             cropX = Math.max(0, Math.min(sourceImage.width - cw, cropX));
             cropY = Math.max(0, Math.min(sourceImage.height - ch, cropY));
             const rect = cropCanvas.getBoundingClientRect();
@@ -349,6 +332,74 @@
             cropBox.style.height = (ch / scale) + 'px';
         }
 
+        // Image upload -> resize untuk SD -> show crop stage
+        imageInput.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const img = new Image();
+            img.onload = () => {
+                sourceImage = resizeForSD(img);
+                cropCanvas.width = sourceImage.width;
+                cropCanvas.height = sourceImage.height;
+                cropCanvas.getContext('2d').drawImage(sourceImage, 0, 0);
+                cropX = Math.max(0, Math.floor((sourceImage.width - CROP_SIZE) / 2));
+                cropY = Math.max(0, Math.floor((sourceImage.height - CROP_SIZE) / 2));
+                setTimeout(updateCropBox, 50);
+                cropStage.style.display = 'block';
+                canvasWrapper.style.display = 'none';
+                brushControls.style.display = 'none';
+                inpaintBtn.disabled = true;
+            };
+            img.src = URL.createObjectURL(file);
+        };
+
+        // Load zip (image.png + mask.png) - skip masking
+        loadZipBtn.onclick = () => zipInput.click();
+        zipInput.onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const fd = new FormData();
+            fd.append('file', file);
+            try {
+                const res = await fetch('/api/load-zip', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (!data.success) {
+                    showStatus(inpaintStatus, data.error || 'Gagal load zip', 'error');
+                    return;
+                }
+                const img = new Image();
+                img.onload = () => {
+                    let cw = img.width, ch = img.height;
+                    if (cw !== CROP_SIZE || ch !== CROP_SIZE) {
+                        cw = CROP_SIZE;
+                        ch = CROP_SIZE;
+                    }
+                    sourceImage = document.createElement('canvas');
+                    sourceImage.width = cw;
+                    sourceImage.height = ch;
+                    sourceImage.getContext('2d').drawImage(img, 0, 0, img.width, img.height, 0, 0, cw, ch);
+                    imageCanvas.width = maskCanvas.width = cw;
+                    imageCanvas.height = maskCanvas.height = ch;
+                    imageCanvas.getContext('2d').drawImage(img, 0, 0);
+                    const maskImg = new Image();
+                    maskImg.onload = () => {
+                        const mCtx = maskCanvas.getContext('2d');
+                        mCtx.clearRect(0, 0, cw, ch);
+                        mCtx.drawImage(maskImg, 0, 0, maskImg.width, maskImg.height, 0, 0, cw, ch);
+                        cropStage.style.display = 'none';
+                        canvasWrapper.style.display = 'block';
+                        brushControls.style.display = 'flex';
+                        inpaintBtn.disabled = false;
+                        showStatus(inpaintStatus, 'Zip berhasil dimuat. Mask sudah terisi.', 'success');
+                    };
+                    maskImg.src = data.mask;
+                };
+                img.src = data.image;
+            } catch (err) {
+                showStatus(inpaintStatus, 'Error: ' + err.message, 'error');
+            }
+            e.target.value = '';
+        };
 
         cropBox.addEventListener('mousedown', (e) => {
             e.preventDefault();
@@ -362,8 +413,8 @@
             if (!cropDragging || !sourceImage) return;
             const rect = cropCanvas.getBoundingClientRect();
             const scale = cropCanvas.width / rect.width;
-            const cw = Math.floor((parseInt(cropWidthInput.value) || 512) / 8) * 8;
-            const ch = Math.floor((parseInt(cropHeightInput.value) || 512) / 8) * 8;
+            const cw = Math.min(CROP_SIZE, sourceImage.width);
+            const ch = Math.min(CROP_SIZE, sourceImage.height);
             cropX = Math.round(((e.clientX - rect.left) - cropDragStartX) * scale);
             cropY = Math.round(((e.clientY - rect.top) - cropDragStartY) * scale);
             cropX = Math.max(0, Math.min(sourceImage.width - cw, cropX));
@@ -376,8 +427,8 @@
             if (e.target === cropCanvas) {
                 const rect = cropCanvas.getBoundingClientRect();
                 const scale = cropCanvas.width / rect.width;
-                const cw = Math.floor((parseInt(cropWidthInput.value) || 512) / 8) * 8;
-                const ch = Math.floor((parseInt(cropHeightInput.value) || 512) / 8) * 8;
+                const cw = Math.min(CROP_SIZE, sourceImage.width);
+                const ch = Math.min(CROP_SIZE, sourceImage.height);
                 cropX = Math.round((e.clientX - rect.left) * scale - cw / 2);
                 cropY = Math.round((e.clientY - rect.top) * scale - ch / 2);
                 cropX = Math.max(0, Math.min(sourceImage.width - cw, cropX));
@@ -388,19 +439,18 @@
 
         applyCropBtn.onclick = () => {
             if (!sourceImage) return;
-            let cw = Math.floor((parseInt(cropWidthInput.value) || 512) / 8) * 8;
-            let ch = Math.floor((parseInt(cropHeightInput.value) || 512) / 8) * 8;
-            cw = Math.min(cw, sourceImage.width);
-            ch = Math.min(ch, sourceImage.height);
+            const cw = Math.min(CROP_SIZE, sourceImage.width);
+            const ch = Math.min(CROP_SIZE, sourceImage.height);
             cropX = Math.max(0, Math.min(sourceImage.width - cw, cropX));
             cropY = Math.max(0, Math.min(sourceImage.height - ch, cropY));
 
-            imageCanvas.width = maskCanvas.width = cw;
-            imageCanvas.height = maskCanvas.height = ch;
+            // Output selalu 512x512 (resize jika crop lebih kecil)
+            imageCanvas.width = maskCanvas.width = CROP_SIZE;
+            imageCanvas.height = maskCanvas.height = CROP_SIZE;
             const imgCtx = imageCanvas.getContext('2d');
-            imgCtx.drawImage(sourceImage, cropX, cropY, cw, ch, 0, 0, cw, ch);
+            imgCtx.drawImage(sourceImage, cropX, cropY, cw, ch, 0, 0, CROP_SIZE, CROP_SIZE);
             const maskCtx = maskCanvas.getContext('2d');
-            maskCtx.clearRect(0, 0, cw, ch);
+            maskCtx.clearRect(0, 0, CROP_SIZE, CROP_SIZE);
 
             cropStage.style.display = 'none';
             canvasWrapper.style.display = 'block';
@@ -462,7 +512,7 @@
             return imageCanvas.toDataURL('image/png');
         }
 
-        // Inpaint
+        // Inpaint dengan progress bar & runtime
         inpaintBtn.onclick = async () => {
             const prompt = promptInput.value.trim();
             if (!prompt) {
@@ -475,8 +525,13 @@
             }
 
             inpaintBtn.disabled = true;
+            resultContainer.style.display = 'none';
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressText.textContent = 'Memulai...';
             showStatus(inpaintStatus, 'Menjalankan inpainting...', 'loading');
 
+            const numSteps = parseInt(numStepsInput.value) || 50;
             try {
                 const res = await fetch('/api/inpaint', {
                     method: 'POST',
@@ -488,23 +543,51 @@
                         negative_prompt: negativePrompt.value,
                         strength: parseFloat(strengthInput.value),
                         guidance_scale: 7.5,
-                        num_steps: parseInt(numStepsInput.value),
+                        num_steps: numSteps,
                         seed: parseInt(seedInput.value) || 42
                     })
                 });
                 const data = await res.json();
-                if (data.success) {
-                    resultImage.src = data.image;
-                    resultContainer.style.display = 'block';
-                    showStatus(inpaintStatus, 'Selesai!', 'success');
-                    downloadBtn.style.display = 'inline-block';
-                } else {
+                if (!data.success) {
                     showStatus(inpaintStatus, data.error || 'Gagal', 'error');
+                    progressContainer.style.display = 'none';
+                    inpaintBtn.disabled = false;
+                    return;
                 }
+                const jobId = data.job_id;
+
+                const poll = async () => {
+                    const sRes = await fetch('/api/inpaint-status/' + jobId);
+                    const s = await sRes.json();
+                    const step = s.step || 0;
+                    const total = s.total_steps || numSteps;
+                    const elapsed = s.elapsed_sec || 0;
+                    progressBar.style.width = (100 * step / total) + '%';
+                    progressText.textContent = `Step ${step}/${total} • ${elapsed}s`;
+
+                    if (s.status === 'done') {
+                        resultImage.src = s.image;
+                        resultContainer.style.display = 'block';
+                        progressContainer.style.display = 'none';
+                        runtimeText.textContent = 'Runtime: ' + s.elapsed_sec + ' detik';
+                        showStatus(inpaintStatus, 'Selesai! Runtime: ' + s.elapsed_sec + ' detik', 'success');
+                        inpaintBtn.disabled = false;
+                        return;
+                    }
+                    if (s.status === 'error') {
+                        showStatus(inpaintStatus, s.error || 'Error', 'error');
+                        progressContainer.style.display = 'none';
+                        inpaintBtn.disabled = false;
+                        return;
+                    }
+                    setTimeout(poll, 300);
+                };
+                poll();
             } catch (e) {
                 showStatus(inpaintStatus, 'Error: ' + e.message, 'error');
+                progressContainer.style.display = 'none';
+                inpaintBtn.disabled = false;
             }
-            inpaintBtn.disabled = false;
         };
 
         downloadBtn.onclick = () => {
@@ -514,6 +597,28 @@
             a.href = src;
             a.download = 'inpaint_result.png';
             a.click();
+        };
+
+        downloadZipBtn.onclick = async () => {
+            const imgSrc = getImageBase64();
+            const maskSrc = getMaskBase64();
+            const resultSrc = resultImage.src;
+            if (!imgSrc || !maskSrc || !resultSrc) return;
+            try {
+                const res = await fetch('/api/download-zip', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: imgSrc, mask: maskSrc, result: resultSrc })
+                });
+                const blob = await res.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'inpaint_result.zip';
+                a.click();
+                URL.revokeObjectURL(a.href);
+            } catch (e) {
+                showStatus(inpaintStatus, 'Error download zip: ' + e.message, 'error');
+            }
         };
     </script>
 </body>
