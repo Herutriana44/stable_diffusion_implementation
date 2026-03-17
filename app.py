@@ -21,15 +21,10 @@ from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file
 from PIL import Image
 import torch
+import prompt_templates
 
 # Template prompt - format list, bisa diubah sesuai kebutuhan
-PROMPT_TEMPLATES = [
-    "a beautiful flower, highly detailed, 8k",
-    "a cute cat, photorealistic, soft lighting",
-    "a serene landscape, mountains, sunset, 4k",
-    "portrait of a person, professional photo, studio lighting",
-    "abstract art, vibrant colors, modern design",
-]
+PROMPT_TEMPLATES = prompt_templates.PROMPT_TEMPLATES
 
 # Lazy load diffusers - hanya saat inference
 _pipeline = None
